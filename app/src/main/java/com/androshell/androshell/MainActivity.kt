@@ -1,6 +1,9 @@
 package com.androshell.androshell
 
 import android.os.Bundle
+import android.view.Menu
+import android.view.MenuItem
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.androshell.androshell.databinding.ActivityMainBinding
 import kotlinx.coroutines.*
@@ -13,16 +16,26 @@ class MainActivity : AppCompatActivity() {
     private var inS: InputStream? = null
     private var outS: OutputStream? = null
     private var pfd: android.os.ParcelFileDescriptor? = null
+    private lateinit var shellEnv: ShellEnvironment
+    private lateinit var cmdExecutor: CommandExecutor
+    private var useBuiltinCommands = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
+        
+        val home = File(filesDir, "home").apply { mkdirs() }
+        shellEnv = ShellEnvironment(home)
+        cmdExecutor = CommandExecutor(shellEnv)
+        
         startShell()
 
         b.input.setOnEditorActionListener { v, _, _ ->
-            val line = v.text.toString()
-            send("$line\n")
+            val line = v.text.toString().trim()
+            if (line.isNotEmpty()) {
+                handleCommand(line)
+            }
             v.text = null
             true
         }
@@ -30,8 +43,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun startShell() {
         val home = File(filesDir, "home").apply { mkdirs() }
-        val envp = arrayOf("HOME=${home.absolutePath}",
-            "PATH=/system/bin:/system/xbin", "TERM=xterm-256color")
+        val envp = arrayOf(
+            "HOME=${home.absolutePath}",
+            "PATH=/system/bin:/system/xbin", 
+            "TERM=xterm-256color",
+            "USER=android"
+        )
 
         pfd = NativePty.startProcess("/system/bin/sh", home.absolutePath, envp)
         val fd = pfd?.fileDescriptor ?: error("PTY open failed")
@@ -53,10 +70,91 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        send("export PS1='\\u@androshell:\\w\\$ '\n")
+        
+        // Show welcome message
+        appendToConsole("╔════════════════════════════════════╗\n")
+        appendToConsole("║     Welcome to AndroShell v1.0     ║\n")
+        appendToConsole("╚════════════════════════════════════╝\n")
+        appendToConsole("Type 'help' for available commands\n\n")
+        appendToConsole(shellEnv.getPrompt())
+    }
+
+    private fun handleCommand(cmdLine: String) {
+        appendToConsole("$cmdLine\n")
+        
+        when {
+            cmdLine == "exit" -> finish()
+            cmdLine == "clear" -> b.console.text = ""
+            useBuiltinCommands -> {
+                val output = cmdExecutor.execute(cmdLine)
+                if (output.isNotEmpty()) {
+                    appendToConsole(output)
+                }
+                shellEnv.updatePwd()
+                appendToConsole(shellEnv.getPrompt())
+            }
+            else -> send("$cmdLine\n")
+        }
+    }
+
+    private fun appendToConsole(text: String) {
+        scope.launch(Dispatchers.Main) {
+            b.console.append(text)
+            b.console.post {
+                (b.console.parent as android.widget.ScrollView)
+                    .fullScroll(android.view.View.FOCUS_DOWN)
+            }
+        }
     }
 
     private fun send(s: String) { scope.launch { outS?.write(s.toByteArray()) } }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.menu_main, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.action_clear -> {
+                b.console.text = ""
+                appendToConsole(shellEnv.getPrompt())
+                true
+            }
+            R.id.action_help -> {
+                handleCommand("help")
+                true
+            }
+            R.id.action_about -> {
+                showAboutDialog()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    private fun showAboutDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("About AndroShell")
+            .setMessage("""
+                AndroShell v1.0
+                
+                A lightweight Android terminal with 30+ built-in commands.
+                
+                Features:
+                • Pure Kotlin implementation
+                • No external binaries required
+                • Native PTY support
+                • Material Design UI
+                
+                Developed by Mukesh-SCS
+                
+                License: MIT
+                GitHub: github.com/Mukesh-SCS/AndroShell
+            """.trimIndent())
+            .setPositiveButton("OK", null)
+            .show()
+    }
 
     override fun onDestroy() {
         try { send("exit\n") } catch (_: Exception) {}
@@ -64,21 +162,4 @@ class MainActivity : AppCompatActivity() {
         scope.cancel()
         super.onDestroy()
     }
-
-
-    private fun installBusyBox(): File {
-        val rt = File(filesDir, "runtime/bin").apply { mkdirs() }
-        val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "x86_64"
-        val assetName = if (abi.contains("86")) "bin/busybox-x86_64" else "bin/busybox-aarch64"
-        val dst = File(rt, "busybox")
-        if (!dst.exists()) {
-            assets.open(assetName).use { inp ->
-                FileOutputStream(dst).use { out -> inp.copyTo(out) }
-            }
-            try { android.system.Os.chmod(dst.absolutePath, 0b111_101_101) } // 0755
-            catch (_: Throwable) { dst.setExecutable(true, false) }
-        }
-        return dst
-    }
-
 }
