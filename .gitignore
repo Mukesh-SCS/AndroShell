@@ -13,3 +13,6 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Prevent external binaries from being added
+app/src/main/assets/bin/
